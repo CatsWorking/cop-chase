@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Heat Level: Pursuit</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; font-family: 'Courier New', Courier, monospace; color: white; user-select: none; }
+        canvas { display: block; }
+        
+        /* UI Elements */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        
+        .panel { background: rgba(0, 0, 0, 0.6); border: 1px solid #444; padding: 10px; position: absolute; }
+        
+        #top-left { top: 20px; left: 20px; }
+        #top-left h2 { margin: 0 0 10px 0; color: #ff3333; font-size: 24px;}
+        
+        #stats-left { top: 40%; left: 20px; transform: translateY(-50%); }
+        .stat-bar { width: 200px; height: 15px; background: #333; margin-top: 5px; border: 1px solid #fff;}
+        .health-fill { width: 100%; height: 100%; background: #ff3333; transition: width 0.2s; }
+        
+        #heat-bottom { bottom: 20px; left: 50%; transform: translateX(-50%); text-align: center; }
+        #heat-bottom h1 { margin: 0; font-size: 48px; color: #ff8800; text-shadow: 0 0 10px red; }
+        
+        /* Settings Menu */
+        #settings-menu { position: absolute; top: 20px; right: 20px; pointer-events: auto; }
+        button, select, input { background: #222; color: white; border: 1px solid #555; padding: 5px; font-family: inherit; }
+        
+        /* Heat Level Up Flash Effect */
+        @keyframes flashBlue {
+            0% { box-shadow: inset 0 0 0 0 rgba(0, 100, 255, 0); }
+            10% { box-shadow: inset 0 0 150px 50px rgba(0, 100, 255, 0.5); }
+            100% { box-shadow: inset 0 0 0 0 rgba(0, 100, 255, 0); }
+        }
+        .flash-active { animation: flashBlue 1s ease-out; }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="ui-layer">
+        <div id="top-left" class="panel">
+            <h2 id="ui-heat-title">HEAT LEVEL 1</h2>
+            <div>BOUNTY: $<span id="ui-bounty">0</span></div>
+            <div>SURVIVED: <span id="ui-time">0</span>s</div>
+        </div>
+
+        <div id="stats-left" class="panel">
+            <div>CAR HEALTH</div>
+            <div class="stat-bar"><div id="ui-health" class="health-fill"></div></div>
+            <br>
+            <div>BACKUP ARRIVES IN: <span id="ui-refill">30</span>s</div>
+        </div>
+
+        <div id="heat-bottom" class="panel">
+            <div>CURRENT HEAT</div>
+            <h1 id="ui-heat-large">1</h1>
+        </div>
+    </div>
+
+    <div id="settings-menu" class="panel">
+        <div><b>SETTINGS</b></div>
+        <label>Render Scale:</label>
+        <select id="set-render" onchange="updateSettings()">
+            <option value="1">High (100%)</option>
+            <option value="0.75">Med (75%)</option>
+            <option value="0.5">Low (50% - Fast)</option>
+        </select><br><br>
+        <label>FPS Limiter:</label>
+        <select id="set-fps" onchange="updateSettings()">
+            <option value="0">Off (Max)</option>
+            <option value="60">60 FPS</option>
+            <option value="30">30 FPS (Power Save)</option>
+        </select>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- GAME STATE ---
+        const gameState = {
+            heatLevel: 1,
+            bounty: 0,
+            timeSurvived: 0,
+            health: 100,
+            backupTimer: 30,
+            maxCops: 3,
+            copsActive: 0,
+            renderScale: 1,
+            targetFPS: 0 // 0 means uncapped
+        };
+
+        // --- AUDIO MANAGER ---
+        // Maps to your requested files. Ensure the 'media' folder is on your GitHub repo.
+        const audio = {
+            anticipation: new Audio('media/anticipation1.mp3'),
+            backup: new Audio('media/backup1.mp3'),
+            chase: new Audio('media/chase1.mp3'),
+            siren: new Audio('media/policeloop.mp3'),
+            ambience: new Audio('media/ambienceloop.mp3')
+        };
+        // Setup looping for background tracks
+        audio.siren.loop = true;
+        audio.ambience.loop = true;
+        // NOTE: Browsers require user interaction before playing audio.
+        let audioStarted = false;
+        document.body.addEventListener('click', () => {
+            if(!audioStarted) { audio.ambience.play(); audioStarted = true; }
+        });
+
+        // --- THREE.JS SETUP ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x111111);
+        scene.fog = new THREE.Fog(0x111111, 20, 100); // Gives a moody look
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: false }); // Antialias off for performance
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x404040); // Soft white light
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(10, 20, 10);
+        scene.add(dirLight);
+
+        // Ground/Map
+        const groundGeo = new THREE.PlaneGeometry(500, 500);
+        const groundMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        scene.add(ground);
+
+        // Grid helper for visual reference
+        const gridHelper = new THREE.GridHelper(500, 100, 0x444444, 0x222222);
+        scene.add(gridHelper);
+
+        // --- ENTITIES ---
+        
+        // 1. Player (The Red Car)
+        const carGeo = new THREE.BoxGeometry(2, 1, 4);
+        const carMat = new THREE.MeshLambertMaterial({ color: 0xff0000 }); // RED CAR
+        const player = new THREE.Mesh(carGeo, carMat);
+        player.position.y = 0.5;
+        scene.add(player);
+
+        const playerPhysics = {
+            velocity: 0, maxSpeed: 0.5, acceleration: 0.01, friction: 0.98,
+            turnSpeed: 0.05, angle: 0
+        };
+
+        // 2. Cops Array
+        const cops = [];
+        
+        // Spawn Cop Function
+        function spawnCop() {
+            if (cops.length >= gameState.maxCops) return;
+            
+            // Basic Patrol Vehicle (Expand logic here for SUV, FBI, Bearcat based on heatLevel)
+            const copGeo = new THREE.BoxGeometry(2, 1, 4);
+            const copMat = new THREE.MeshLambertMaterial({ color: 0x0000ff }); // Blue for basic cop
+            const cop = new THREE.Mesh(copGeo, copMat);
+            
+            // Spawn away from player
+            cop.position.set(
+                player.position.x + (Math.random() - 0.5) * 50,
+                0.5,
+                player.position.z + (Math.random() - 0.5) * 50
+            );
+            
+            scene.add(cop);
+            cops.push({
+                mesh: cop,
+                speed: 0.4 + (gameState.heatLevel * 0.02), // Cops get faster with heat
+                type: 'patrol' // Change to 'suv', 'fbi', etc. later
+            });
+        }
+
+        // --- CONTROLS ---
+        const keys = { w: false, a: false, s: false, d: false };
+        window.addEventListener('keydown', (e) => keys[e.key.toLowerCase()] = true);
+        window.addEventListener('keyup', (e) => keys[e.key.toLowerCase()] = false);
+
+        // --- GAME LOGIC & UI UPDATES ---
+        function triggerHeatLevelUp() {
+            if(gameState.heatLevel >= 10) return;
+            gameState.heatLevel++;
+            gameState.maxCops = Math.min(30, gameState.heatLevel * 3); // Max 30 cops
+            
+            // UI Flashes blue
+            const uiLayer = document.getElementById('ui-layer');
+            uiLayer.classList.remove('flash-active');
+            void uiLayer.offsetWidth; // trigger reflow
+            uiLayer.classList.add('flash-active');
+            
+            // Update UI text
+            document.getElementById('ui-heat-title').innerText = `HEAT LEVEL ${gameState.heatLevel}`;
+            document.getElementById('ui-heat-large').innerText = gameState.heatLevel;
+
+            // Audio Logic
+            if(audioStarted) {
+                audio.backup.play();
+                if(cops.length > 5 && audio.chase.paused) {
+                    audio.chase.play();
+                }
+            }
+        }
+
+        let lastTime = performance.now();
+        let frameTimer = 0;
+
+        function updateSettings() {
+            // Render Scale
+            const scale = parseFloat(document.getElementById('set-render').value);
+            renderer.setPixelRatio(window.devicePixelRatio * scale);
+            
+            // FPS
+            gameState.targetFPS = parseInt(document.getElementById('set-fps').value);
+        }
+        window.updateSettings = updateSettings; // Expose to HTML inline listener
+
+        // --- MAIN GAME LOOP ---
+        function animate(currentTime) {
+            requestAnimationFrame(animate);
+
+            const deltaTime = (currentTime - lastTime) / 1000;
+            
+            // Frame Limiter Logic
+            if (gameState.targetFPS > 0) {
+                const interval = 1000 / gameState.targetFPS;
+                if (currentTime - frameTimer < interval) return;
+                frameTimer = currentTime - (currentTime - frameTimer) % interval;
+            }
+            
+            lastTime = currentTime;
+
+            // 1. Player Physics & Movement
+            if (keys.w) playerPhysics.velocity -= playerPhysics.acceleration;
+            if (keys.s) playerPhysics.velocity += playerPhysics.acceleration;
+            if (keys.a && Math.abs(playerPhysics.velocity) > 0.01) playerPhysics.angle += playerPhysics.turnSpeed;
+            if (keys.d && Math.abs(playerPhysics.velocity) > 0.01) playerPhysics.angle -= playerPhysics.turnSpeed;
+
+            // Cap speed and apply friction
+            playerPhysics.velocity = Math.max(-playerPhysics.maxSpeed, Math.min(playerPhysics.maxSpeed, playerPhysics.velocity));
+            if (!keys.w && !keys.s) playerPhysics.velocity *= playerPhysics.friction;
+
+            player.rotation.y = playerPhysics.angle;
+            player.position.x += Math.sin(playerPhysics.angle) * playerPhysics.velocity;
+            player.position.z += Math.cos(playerPhysics.angle) * playerPhysics.velocity;
+
+            // Update Camera to follow player
+            camera.position.x = player.position.x - Math.sin(playerPhysics.angle) * 15;
+            camera.position.z = player.position.z - Math.cos(playerPhysics.angle) * 15;
+            camera.position.y = player.position.y + 7;
+            camera.lookAt(player.position);
+
+            // 2. Cop AI (Pursuit)
+            cops.forEach((cop, index) => {
+                // Calculate direction to player
+                const dx = player.position.x - cop.mesh.position.x;
+                const dz = player.position.z - cop.mesh.position.z;
+                const angleToPlayer = Math.atan2(dx, dz);
+                
+                // Simple rotate and move towards player
+                cop.mesh.rotation.y = angleToPlayer;
+                cop.mesh.position.x += Math.sin(angleToPlayer) * cop.speed * deltaTime * 60;
+                cop.mesh.position.z += Math.cos(angleToPlayer) * cop.speed * deltaTime * 60;
+
+                // Simple Distance Collision detection (Crash logic)
+                const dist = player.position.distanceTo(cop.mesh.position);
+                if (dist < 3) {
+                    // Collision occurred!
+                    gameState.health -= 1; // Drain health rapidly if touching
+                    gameState.bounty += 10; // Earn bounty for crashing them
+                    document.getElementById('ui-health').style.width = Math.max(0, gameState.health) + '%';
+                    
+                    // Push player slightly (physics reaction)
+                    playerPhysics.velocity = playerPhysics.velocity * 0.5; 
+                }
+            });
+
+            // 3. Timers & Logic updates (Every 1 second)
+            if (Math.floor(currentTime) % 1000 < 20) { 
+                gameState.timeSurvived++;
+                document.getElementById('ui-time').innerText = gameState.timeSurvived;
+                document.getElementById('ui-bounty').innerText = gameState.bounty;
+                
+                // Backup timer logic
+                gameState.backupTimer--;
+                if(gameState.backupTimer <= 0) {
+                    triggerHeatLevelUp();
+                    gameState.backupTimer = 30 + (gameState.heatLevel * 5); // Takes longer at higher heat
+                }
+                document.getElementById('ui-refill').innerText = Math.max(0, gameState.backupTimer);
+
+                // Spawn cops if below max
+                if (cops.length < gameState.maxCops) spawnCop();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Start loop
+        animate(performance.now());
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
